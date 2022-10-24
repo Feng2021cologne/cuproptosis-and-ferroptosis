@@ -1,0 +1,563 @@
+## cuprotosisgene survival
+library(limma)
+library(survival)
+library(survminer)
+library(data.table)
+library(dplyr)
+library(tibble)
+library(stringr)
+
+library(survival)
+colnames(rt)[c(1,2)] = c("fustat","futime")
+
+pFilter=1                                                    
+rt$futime <- rt$futime/365
+rt = data.frame(rt)
+outTab=data.frame()
+sigGenes=c("futime","fustat")
+for(i in colnames(rt[,3:ncol(rt)])){
+  cox <- coxph(Surv(futime, fustat) ~ rt[,i], data = rt)
+  coxSummary = summary(cox)
+  coxP=coxSummary$coefficients[,"Pr(>|z|)"]
+  if(coxP<pFilter){
+    sigGenes=c(sigGenes,i)
+    outTab=rbind(outTab,
+                 cbind(id=i,
+                       HR=coxSummary$conf.int[,"exp(coef)"],
+                       HR.95L=coxSummary$conf.int[,"lower .95"],
+                       HR.95H=coxSummary$conf.int[,"upper .95"],
+                       pvalue=coxSummary$coefficients[,"Pr(>|z|)"])
+    )
+  }
+}
+
+write.table(outTab,file="uniCox.txt",sep="\t",row.names=F,quote=F)
+
+##forest
+rt2 <- read.table("uniCox.txt",header=T,sep="\t",row.names=1,check.names=F)
+gene <- rownames(rt2)
+hr <- sprintf("%.3f",rt2$"HR")
+hrLow  <- sprintf("%.3f",rt2$"HR.95L")
+hrHigh <- sprintf("%.3f",rt2$"HR.95H")
+Hazard.ratio <- paste0(hr,"(",hrLow,"-",hrHigh,")")
+pVal <- ifelse(rt2$pvalue<0.001, "<0.001", sprintf("%.3f", rt2$pvalue))
+
+pdf(file="forest.pdf", width = 8,height = 6.5)
+n <- nrow(rt2)
+nRow <- n+1
+ylim <- c(1,nRow)
+layout(matrix(c(1,2),nc=2),width=c(3,2.5))
+
+xlim = c(0,3)
+par(mar=c(4,2.5,2,1))
+plot(1,xlim=xlim,ylim=ylim,type="n",axes=F,xlab="",ylab="")
+text.cex=0.8
+text(0,n:1,gene,adj=0,cex=text.cex)
+text(1.5-0.5*0.2,n:1,pVal,adj=1,cex=text.cex);text(1.5-0.5*0.2,n+1,'pvalue',cex=text.cex,font=2,adj=1)
+text(3,n:1,Hazard.ratio,adj=1,cex=text.cex);text(3,n+1,'Hazard ratio',cex=text.cex,font=2,adj=1,)
+
+
+par(mar=c(4,1,2,1),mgp=c(2,0.5,0))
+xlim = c(0,max(as.numeric(hrLow),as.numeric(hrHigh)))
+plot(1,xlim=xlim,ylim=ylim,type="n",axes=F,ylab="",xaxs="i",xlab="Hazard ratio")
+arrows(as.numeric(hrLow),n:1,as.numeric(hrHigh),n:1,angle=90,code=3,length=0.05,col="darkblue",lwd=2.5)
+abline(v=1,col="black",lty=2,lwd=2)
+#boxcolor = ifelse(as.numeric(hr) > 1, 'red', 'green')
+boxcolor = ifelse(as.numeric(hr) > 1, '#2556a6', '#2556a6')
+points(as.numeric(hr), n:1, pch = 15, col = boxcolor, cex=1.3)
+axis(1)
+dev.off()
+
+
+dir.create("kmplot")
+for (i in colnames(data0)[3:ncol(data0)]) {
+  data=data0[,c("futime", "fustat", i)]
+  colnames(data)=c("futime", "fustat", "gene")
+  res.cut=surv_cutpoint(data, time = "futime", event = "fustat", variables =c("gene"))
+  res.cat=surv_categorize(res.cut)
+  fit=survfit(Surv(futime, fustat) ~gene, data = res.cat)
+  diff=survdiff(Surv(futime, fustat) ~gene,data =res.cat)
+  pValue=1-pchisq(diff$chisq, df=1)
+  if(pValue<0.05){
+    if(pValue<0.001){
+      pValue="p<0.001"
+    }else{
+      pValue=paste0("p=",sprintf("%.03f",pValue))
+    }
+    surPlot=ggsurvplot(fit,
+                       data=res.cat,
+                       pval=pValue,
+                       pval.size=6,
+                       legend.title=i,
+                       legend.labs=c("high","low"),
+                       xlab="Time(years)",
+                       ylab="Overall survival",
+                       palette=c("#e0b759", "#84b5d8"),
+                       break.time.by=5,
+                       conf.int=F,
+                       risk.table=TRUE,
+                       risk.table.title="",
+                       risk.table.height=.25)
+    pdf(file=paste0("kmplot/sur.", i, ".pdf"),onefile = FALSE,
+        width = 8,
+        height =6)
+    print(surPlot)
+    dev.off()
+  }
+}
+
+##ConsensusClusterPlus
+library(data.table)
+library(tibble)
+library(dplyr)
+library(stringr)
+library(survival)
+library(WGCNA)
+
+rt = data.frame(fread("../6.merge/prognosis_data/merge/corrected_data.txt"))
+rt = rt[rt$V1 %in% c(cu$V1,fe),]
+rownames(rt)  = NULL
+rt = column_to_rownames(rt,var = "V1")
+rt = data.frame(t(rt))
+rt = rownames_to_column(rt,var = "id")
+rt$id = gsub("\\.","-",rt$id)
+
+sur1 = data.frame(fread("../5.cuprotosisgene_network/TCGA-LUAD.survival.tsv"))
+sur1 = sur1[,c(1,2,4)]
+sur1$OS.time = sur1$OS.time / 365
+colnames(sur1) = c("id","fustat","futime")
+
+sur2 = data.frame(fread("../6.merge/prognosis_data/GSE30219/survival2.txt"))
+sur2 = sur2[,c(1,3,2)]
+sur3 = data.frame(fread("../6.merge/prognosis_data/GSE31210/survival2.txt"))
+sur4 = data.frame(fread("../6.merge/prognosis_data/GSE3141/survival2.txt"))
+sur5 = data.frame(fread("../6.merge/prognosis_data/GSE37745/survival2.txt"))
+sur6 = data.frame(fread("../6.merge/prognosis_data/GSE81089/survival2.txt"))
+
+sur = Reduce(rbind.data.frame,list(sur1,sur2,sur3,sur4,sur5,sur6))
+
+rt = inner_join(sur,rt,by="id")
+rt = column_to_rownames(rt,var = "id")
+
+outTab=data.frame()
+sigGenes=c("futime","fustat")
+for(i in colnames(rt[,3:ncol(rt)])){
+  cox <- coxph(Surv(futime, fustat) ~ rt[,i], data = rt)
+  coxSummary = summary(cox)
+  coxP=coxSummary$coefficients[,"Pr(>|z|)"]
+  if(coxP<0.1){
+    sigGenes=c(sigGenes,i)
+    outTab=rbind(outTab,
+                 cbind(id=i,
+                       HR=coxSummary$conf.int[,"exp(coef)"],
+                       HR.95L=coxSummary$conf.int[,"lower .95"],
+                       HR.95H=coxSummary$conf.int[,"upper .95"],
+                       pvalue=coxSummary$coefficients[,"Pr(>|z|)"])
+    )
+  }
+}
+write.table(outTab,file="uniCox.txt",sep="\t",row.names=F,quote=F)
+uniSigExp=rt[,sigGenes]
+uniSigExp=cbind(id=row.names(uniSigExp),uniSigExp)
+write.table(uniSigExp,file="uniSigExp.txt",sep="\t",row.names=F,quote=F)
+
+selected_cu = outTab$id[which(outTab$id %in% cu$V1)]
+selected_fe = outTab$id[which(outTab$id %in% fe)]
+
+
+fe1 = read.csv("../8.Cu-Fe_interaction/driver.csv",header = T)
+fe2 = read.csv("../8.Cu-Fe_interaction/suppressor.csv",header = T)
+fe3 = read.csv("../8.Cu-Fe_interaction/marker.csv",header = T)
+cu_exp = rt[,selected_cu]
+
+fe_driver_exp = rt[,colnames(rt) %in% fe1$symbol]
+fe_suppressor_exp = rt[,colnames(rt) %in% fe2$symbol]
+fe_marker_exp = rt[,colnames(rt) %in% fe3$symbol]
+
+ME_cu = moduleEigengenes(cu_exp, rep("cu",ncol(cu_exp)))$eigengenes
+ME_fe_driver = moduleEigengenes(fe_driver_exp, rep("fe_driver",ncol(fe_driver_exp)))$eigengenes
+ME_fe_suppressor = moduleEigengenes(fe_suppressor_exp, rep("fe_suppressor",ncol(fe_suppressor_exp)))$eigengenes
+ME_fe_marker = moduleEigengenes(fe_marker_exp, rep("fe_marker",ncol(fe_marker_exp)))$eigengenes
+
+ME = Reduce(cbind.data.frame,list(ME_cu,ME_fe_driver,ME_fe_suppressor,ME_fe_marker))
+data = t(ME)
+library(ConsensusClusterPlus)
+maxK=9
+results=ConsensusClusterPlus(data,
+                             maxK=maxK,
+                             reps=50,
+                             pItem=0.8,
+                             pFeature=1,
+                             title=".",
+                             clusterAlg="pam",
+                             distance="euclidean",
+                             seed=123456,
+                             plot="pdf")
+icl <- calcICL(results,plot = 'pdf')
+clusterNum=3
+cluster=results[[clusterNum]][["consensusClass"]]
+cluster=as.data.frame(cluster)
+letter=c("A","B","C","D")
+uniqClu=levels(factor(cluster$cluster))
+cluster$cluster=letter[match(cluster$cluster, uniqClu)]
+clusterOut=rbind(ID=colnames(cluster), cluster)
+write.table(clusterOut, file="Cluster.txt", sep="\t", quote=F, col.names=F)
+
+
+##cluster survival
+library(survival)
+library(survminer)
+library(data.table)        
+library(dplyr)
+
+cluster=read.table("../9.cluster/Cluster.txt", header=T, sep="\t", check.names=F, row.names=NULL)
+
+sur1 = data.frame(fread("../5.cuprotosisgene_network/TCGA-LUAD.survival.tsv"))
+sur1 = sur1[,c(1,2,4)]
+sur1$OS.time = sur1$OS.time / 365
+colnames(sur1) = c("id","fustat","futime")
+sur2 = data.frame(fread("../6.merge/prognosis_data/GSE30219/survival2.txt"))
+sur2 = sur2[,c(1,3,2)]
+sur3 = data.frame(fread("../6.merge/prognosis_data/GSE31210/survival2.txt"))
+sur4 = data.frame(fread("../6.merge/prognosis_data/GSE3141/survival2.txt"))
+sur5 = data.frame(fread("../6.merge/prognosis_data/GSE37745/survival2.txt"))
+sur6 = data.frame(fread("../6.merge/prognosis_data/GSE81089/survival2.txt"))
+
+sur = Reduce(rbind.data.frame,list(sur1,sur2,sur3,sur4,sur5,sur6))
+
+data = inner_join(sur,cluster,by=c("id"="ID"))
+
+
+length=length(levels(factor(data$cluster)))
+diff=survdiff(Surv(futime, fustat) ~ cluster, data = data)
+pValue=1-pchisq(diff$chisq, df=length-1)
+if(pValue<0.001){
+	pValue="p<0.001"
+}else{
+	pValue=paste0("p=",sprintf("%.03f",pValue))
+}
+fit <- survfit(Surv(futime, fustat) ~ cluster, data = data)
+
+bioCol=c("#0066FF","#FF9900","#FF0000","#6E568C","#7CC767","#223D6C","#D20A13","#FFD121","#088247","#11AA4D")
+bioCol=bioCol[1:length]
+surPlot=ggsurvplot(fit, 
+		           data=data,
+		           conf.int=F,
+		           pval=pValue,
+		           pval.size=6,
+		           legend.title="CuFecluster",
+		           legend.labs=levels(factor(data[,"cluster"])),
+		           legend = c(0.8, 0.8),
+		           font.legend=10,
+		           xlab="Time(years)",
+		           break.time.by = 5,
+		           palette = bioCol,
+		           #surv.median.line = "hv",
+		           risk.table=T,
+		           cumevents=F,
+		           risk.table.height=.25)
+pdf(file="survival.pdf",onefile = FALSE,width=10,height=8)
+print(surPlot)
+dev.off()
+
+
+## PCA
+library(limma)
+library(ggplot2)
+library(tibble)
+    
+rt=read.table("../9.cluster/uniSigExp.txt", header=T, sep="\t",row.names = 1)
+rt = rt[,-c(1,2)]
+rt=as.matrix(rt)
+
+data.pca=prcomp(rt, scale. = TRUE)
+pcaPredict=predict(data.pca)
+write.table(pcaPredict, file="newTab.txt", quote=F, sep="\t")
+
+cluster=read.table("../9.cluster/Cluster.txt", header=T, sep="\t", check.names=F, row.names=1)
+m6Acluster=as.vector(cluster[,1])
+
+bioCol=c("#0066FF","#FF9900","#FF0000","#6E568C","#7CC767","#223D6C","#D20A13","#FFD121","#088247","#11AA4D")
+m6aCluCol=bioCol[1:length(levels(factor(m6Acluster)))]
+
+PCA=data.frame(PC1=pcaPredict[,1], PC2=pcaPredict[,2], m6Acluster=m6Acluster)
+PCA.mean=aggregate(PCA[,1:2], list(m6Acluster=PCA$m6Acluster), mean)
+pdf(file="PCA.pdf", height=5, width=6.5)
+ggplot(data = PCA, aes(PC1, PC2)) + geom_point(aes(color = m6Acluster)) +
+	scale_colour_manual(name="Cup-Ferroptosis cluster", values =m6aCluCol)+
+    theme_bw()+
+    theme(plot.margin=unit(rep(1.5,4),'lines'))+
+    annotate("text",x=PCA.mean$PC1, y=PCA.mean$PC2, label=PCA.mean$m6Acluster, cex=7)+
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+dev.off()
+
+
+##unicox
+library(limma)
+library(survival)
+library(data.table)
+library(tibble)
+library(dplyr)
+data=read.table("../16.clusterDiff/interGeneExp.txt", header=T, sep="\t", row.names = 1)
+merged = data.frame(fread("../6.merge/prognosis_data/merge/corrected_data.txt",header = T))
+merged = column_to_rownames(merged,var = "V1")
+data = merged[rownames(merged) %in% rownames(data),]
+data=data.frame(t(data))
+
+rownames(data)=gsub("\\.", "-", rownames(data))
+data = rownames_to_column(data,var = "id")
+
+sur1 = data.frame(fread("../5.cuprotosisgene_network/TCGA-LUAD.survival.tsv"))
+sur1 = sur1[,c(1,2,4)]
+sur1$OS.time = sur1$OS.time / 365
+colnames(sur1) = c("id","fustat","futime")
+sur2 = data.frame(fread("../6.merge/prognosis_data/GSE30219/survival2.txt"))
+sur2 = sur2[,c(1,3,2)]
+sur3 = data.frame(fread("../6.merge/prognosis_data/GSE31210/survival2.txt"))
+sur4 = data.frame(fread("../6.merge/prognosis_data/GSE3141/survival2.txt"))
+sur5 = data.frame(fread("../6.merge/prognosis_data/GSE37745/survival2.txt"))
+sur6 = data.frame(fread("../6.merge/prognosis_data/GSE81089/survival2.txt"))
+sur = Reduce(rbind.data.frame,list(sur1,sur2,sur3,sur4,sur5,sur6))
+
+data = inner_join(sur,data,by="id")
+rt = column_to_rownames(data,var = "id")
+
+outTab=data.frame()
+sigGenes=c()
+for(i in colnames(rt[,3:ncol(rt)])){
+	cox <- coxph(Surv(futime, fustat) ~ rt[,i], data = rt)
+	coxSummary = summary(cox)
+	coxP=coxSummary$coefficients[,"Pr(>|z|)"]
+	if(coxP<=0.1){
+		sigGenes=c(sigGenes,i)
+		outTab=rbind(outTab,
+				         cbind(id=i,
+				         HR=coxSummary$conf.int[,"exp(coef)"],
+				         HR.95L=coxSummary$conf.int[,"lower .95"],
+				         HR.95H=coxSummary$conf.int[,"upper .95"],
+				         pvalue=coxSummary$coefficients[,"Pr(>|z|)"])
+				        )
+	}
+}
+write.table(outTab,file="uniCox.txt",sep="\t",row.names=F,quote=F)
+sigGeneExp=rt[,outTab$id]
+sigGeneExp=rbind(id=colnames(sigGeneExp), sigGeneExp)
+write.table(sigGeneExp, file="uniSigGeneExp.txt", sep="\t", quote=F, col.names=F)
+
+
+##genecluster
+library(limma)
+library(ConsensusClusterPlus)
+
+data=read.table("../18.uniCox/uniSigGeneExp.txt", header=T, sep="\t", row.names = 1)
+data = t(data)
+
+maxK=9
+results=ConsensusClusterPlus(data,
+              maxK=maxK,
+              reps=50,
+              pItem=0.8,
+              pFeature=1,
+              title=".",
+              clusterAlg="pam",
+              distance="euclidean",
+              seed=123456,
+              plot="pdf")
+icl <- calcICL(results,plot = 'pdf')
+clusterNum=3      
+cluster=results[[clusterNum]][["consensusClass"]]
+cluster=as.data.frame(cluster)
+colnames(cluster)=c("geneCluster")
+letter=c("A","B","C","D","E","F","G")
+uniqClu=levels(factor(cluster$geneCluster))
+cluster$geneCluster=letter[match(cluster$geneCluster, uniqClu)]
+clusterOut=rbind(ID=colnames(cluster), cluster)
+write.table(clusterOut, file="geneCluster.txt", sep="\t", quote=F, col.names=F)
+
+
+##geneCluster survival
+library(survival)
+library(survminer)
+library(data.table)
+library(dplyr)
+
+cluster=read.table("../19.geneCluster/geneCluster.txt", header=T, sep="\t", check.names=F, row.names=NULL)
+
+sur1 = data.frame(fread("../5.cuprotosisgene_network/TCGA-LUAD.survival.tsv"))
+sur1 = sur1[,c(1,2,4)]
+sur1$OS.time = sur1$OS.time / 365
+colnames(sur1) = c("id","fustat","futime")
+sur2 = data.frame(fread("../6.merge/prognosis_data/GSE30219/survival2.txt"))
+sur2 = sur2[,c(1,3,2)]
+sur3 = data.frame(fread("../6.merge/prognosis_data/GSE31210/survival2.txt"))
+sur4 = data.frame(fread("../6.merge/prognosis_data/GSE3141/survival2.txt"))
+sur5 = data.frame(fread("../6.merge/prognosis_data/GSE37745/survival2.txt"))
+sur6 = data.frame(fread("../6.merge/prognosis_data/GSE81089/survival2.txt"))
+
+sur = Reduce(rbind.data.frame,list(sur1,sur2,sur3,sur4,sur5,sur6))
+
+rt = inner_join(sur,cluster,by=c("id"="ID"))
+
+length=length(levels(factor(rt$geneCluster)))
+diff=survdiff(Surv(futime, fustat) ~ geneCluster, data = rt)
+pValue=1-pchisq(diff$chisq, df=length-1)
+if(pValue<0.001){
+	pValue="p<0.001"
+}else{
+	pValue=paste0("p=",sprintf("%.03f",pValue))
+}
+fit <- survfit(Surv(futime, fustat) ~ geneCluster, data = rt)
+
+bioCol=c("#0066FF","#FF9900","#FF0000","#6E568C","#7CC767","#223D6C","#D20A13","#FFD121","#088247","#11AA4D")
+bioCol=bioCol[1:length(levels(factor(rt[,"geneCluster"])))]
+surPlot=ggsurvplot(fit, 
+		           data=rt,
+		           conf.int=F,
+		           pval=pValue,
+		           pval.size=6,
+		           legend.labs=levels(factor(rt[,"geneCluster"])),
+		           legend.title="geneCluster",
+		           legend = c(0.8, 0.8),
+		           font.legend=10,
+		           xlab="Time(years)",
+		           break.time.by = 5,
+		           palette = bioCol,
+		           #surv.median.line = "hv",
+		           risk.table=T,
+		           cumevents=F,
+		           risk.table.height=.25)
+pdf(file="geneclustersurvival.pdf", onefile = FALSE, width=8, height=6)
+print(surPlot)
+dev.off()
+
+
+##Cup-FerroptosisScore
+library(WGCNA)
+data=read.table("", header=T, sep="\t", check.names=F, row.names=1)
+score = moduleEigengenes(data, rep("score",ncol(data)))$eigengenes
+write.table(score, file="Cup-FerroptosisScore.txt", sep="\t", quote=F,row.names = T)
+
+
+##score survival
+library(survival)
+library(survminer)
+library(data.table)
+library(dplyr)
+
+data = inner_join(sur,score,by=c("id"="row.names"))
+
+res.cut=surv_cutpoint(data, time="futime", event="fustat", variables=c("MEscore"))
+cutoff=as.numeric(res.cut$cutpoint[1])
+print(cutoff)
+Type=ifelse(data[,"MEscore"]<=cutoff, "Low", "High")
+data$group=Type
+outTab=rbind(id=colnames(data), data)
+write.table(outTab, file="Cup-FerroptosisScore.group.txt", sep="\t", quote=F, col.names=F)
+
+data$group=factor(data$group, levels=c("Low", "High"))
+diff=survdiff(Surv(futime, fustat) ~ group, data = data)
+length=length(levels(factor(data[,"group"])))
+pValue=1-pchisq(diff$chisq, df=length-1)
+if(pValue<0.001){
+	pValue="p<0.001"
+}else{
+	pValue=paste0("p=",sprintf("%.03f",pValue))
+}
+fit <- survfit(Surv(futime, fustat) ~ group, data = data)
+
+bioCol=c("#0066FF","#FF0000","#6E568C","#7CC767","#223D6C","#D20A13","#FFD121","#088247","#11AA4D")
+bioCol=bioCol[1:length]
+surPlot=ggsurvplot(fit, 
+			       data=data,
+			       conf.int=F,
+			       pval=pValue,
+			       pval.size=6,
+			       legend.title="CuFeScore",
+			       legend.labs=levels(factor(data[,"group"])),
+			       legend = c(0.8, 0.8),
+			       font.legend=12,
+			       xlab="Time(years)",
+			       break.time.by = 5,
+			       palette = bioCol,
+			       #surv.median.line = "hv",
+			       risk.table=T,
+			       cumevents=F,
+			       risk.table.height=.25)
+
+pdf(file="scoresurvival.pdf", onefile = FALSE, width=10, height=8)
+print(surPlot)
+dev.off()
+
+
+library(pRRophetic)
+library(ggplot2)
+library(cowplot)
+library(stringr)
+library(ggpubr)
+library(dplyr)
+library(tibble)
+library(data.table)
+
+
+jco <- c("#EABF00", "#2874C5", "red")、
+GCPinfo <- GCP.IC50 <- GCP.expr <- cvOut <- predictedPtype <- predictedBoxdat <- list() # 初始化列表
+plotp <- list()
+
+for (drug in GCP.drug) {
+  set.seed(1248103) 
+  cat(drug," starts!\n") 
+  predictedPtype[[drug]] <- pRRopheticPredict(testMatrix = as.matrix(dat[,rownames(ann)]),
+                                              drug = drug,
+                                              tissueType = "allSolidTumors",
+                                              selection = 1) 
+  if(!all(names(predictedPtype[[drug]])==rownames(ann))) {stop("Name mismatched!\n")}
+  predictedBoxdat[[drug]] <- data.frame("est.ic50"=predictedPtype[[drug]],
+                                        "ImmClust"=ann$group, 
+                                        row.names = names(predictedPtype[[drug]])) 
+  predictedBoxdat[[drug]]$ImmClust <- factor(predictedBoxdat[[drug]]$ImmClust) # 把类改成因子变量
+
+}
+
+p <- vector()
+for (drug in GCP.drug) {
+  tmp <- kruskal.test(est.ic50 ~ ImmClust,
+                     data = predictedBoxdat[[drug]])$p.value
+  p <- append(p,tmp) 
+}
+names(p) <- GCP.drug
+
+p2 = data.frame(p)
+p2$FDR = p.adjust(p2$p)
+write.table(p2,"output_pvalue.txt", quote = F, sep = "\t")
+
+sig = p2[p2$p <= 0.05,,drop=F]
+dim(sig)
+write.table(sig,"output_pvalue_sig.txt", quote = F, sep = "\t")
+
+data = data.frame()
+for (i in 1:length(predictedBoxdat)) {
+ lowmed =  median(predictedBoxdat[[i]]$est.ic50[predictedBoxdat[[i]]$ImmClust == "Low"])
+ highmed =  median(predictedBoxdat[[i]]$est.ic50[predictedBoxdat[[i]]$ImmClust == "High"])
+ data0 = data.frame(drug = names(predictedBoxdat[i]),
+                   lowmed = lowmed,
+                   highmed = highmed)
+ data = rbind.data.frame(data,data0)
+}
+
+p3 = rownames_to_column(p2,var = "drug")
+p3  = mutate(p3,Statistical_test = ifelse(p < 0.05 & FDR < 0.05,"P < 0.05 and FDR < 0.05",
+                                          ifelse(p < 0.05 & FDR > 0.05,"P < 0.05 and FDR > 0.05","P > 0.05 and FDR > 0.05")))
+
+data2  = inner_join(p3[,-c(2,3)],data,by="drug")
+data2 = mutate(data2,value = (exp(highmed) / exp(lowmed)) - 1) %>%
+  arrange(desc(value))
+data2$drug = factor(data2$drug,levels = data2$drug)
+ggplot(data2,aes(drug,value)) +
+  geom_bar(stat="identity",aes(fill = Statistical_test)) +
+  scale_fill_manual(values = c("#61adad","#f4d240","#caccce")) +
+  ylab("Exp(Median estimated IC50 (H))\n —————————————————— - 1\n Exp(Median estimated IC50 (L))") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45,hjust = 1,size = 5),
+        panel.grid = element_blank(),
+        legend.position = c(0.8,0.8))
+ggsave("drug-barplot.pdf",width = 14,height = 6)
